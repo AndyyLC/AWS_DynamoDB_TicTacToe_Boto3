@@ -1,6 +1,12 @@
+# This is an update to the the deprecated and archived AWS DynamoDB Tic Toe Example that no longer works at https://github.com/amazon-archives/dynamodb-tictactoe-example-app 
+# The old version used a deprecated version of Boto and updated the code to use Boto3 to get it working again 
+# - Andy Lau
+
+
+
 # Tic Tac Toe on DynamoDB
 
-TicTacToe is a lightweight application that runs on Python and depends on two packages, Flask(0.9) and Boto(2.27).  If you want in depth information about the application and DynamoDB check out [Tic Tac Toe on DynamoDB](http://docs.aws.amazon.com/amazondynamodb/latest/developerguide/ExampleApps.html).
+TicTacToe is a lightweight application that runs on Python and depends on two packages, Flask(0.9) and ~~Boto(2.27~~  If you want in depth information about the application and DynamoDB check out [Tic Tac Toe on DynamoDB](http://docs.aws.amazon.com/amazondynamodb/latest/developerguide/ExampleApps.html).
 
 Below are instructions that will help you launch the application.
 These instructions will also require you to have access to a terminal.
