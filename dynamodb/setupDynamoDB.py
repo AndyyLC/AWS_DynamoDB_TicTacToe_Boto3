@@ -1,106 +1,103 @@
-# Copyright 2014. Amazon Web Services, Inc. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-from boto.exception         import JSONResponseError
-from boto.dynamodb2.fields  import KeysOnlyIndex
-from boto.dynamodb2.fields  import GlobalAllIndex
-from boto.dynamodb2.fields  import HashKey
-from boto.dynamodb2.fields  import RangeKey
-from boto.dynamodb2.layer1  import DynamoDBConnection
-from boto.dynamodb2.table   import Table
-
-try:
-    from urllib.request import urlopen
-except ImportError:
-    from urllib2 import urlopen
-import json
+from urllib.request import urlopen
+import boto3
+from botocore.exceptions import ClientError
+from flask import json
 
 def getDynamoDBConnection(config=None, endpoint=None, port=None, local=False, use_instance_metadata=False):
     if local:
-        db = DynamoDBConnection(
-            host=endpoint,
-            port=port,
-            aws_secret_access_key='ticTacToeSampleApp',
+        
+        return boto3.resource(
+            'dynamodb',
+            endpoint_url=f"{endpoint}:{port}",
             aws_access_key_id='ticTacToeSampleApp',
-            is_secure=False)
+            aws_secret_access_key='ticTacToeSampleApp',
+            region_name='us-west-2'
+        )
+    
     else:
-        params = {
-            'is_secure': True
-            }
+        params = {}
 
-        # Read from config file, if provided
-        if config is not None:
+        # ✅ Read from config if provided
+        if config:
             if config.has_option('dynamodb', 'region'):
-                params['region'] = config.get('dynamodb', 'region')
+                params['region_name'] = config.get('dynamodb', 'region')
             if config.has_option('dynamodb', 'endpoint'):
-                params['host'] = config.get('dynamodb', 'endpoint')
-
+                params['endpoint_url'] = config.get('dynamodb', 'endpoint')
             if config.has_option('dynamodb', 'aws_access_key_id'):
                 params['aws_access_key_id'] = config.get('dynamodb', 'aws_access_key_id')
                 params['aws_secret_access_key'] = config.get('dynamodb', 'aws_secret_access_key')
 
-        # Use the endpoint specified on the command-line to trump the config file
-        if endpoint is not None:
-            params['host'] = endpoint
-            if 'region' in params:
-                del params['region']
+        # ✅ Override endpoint if provided
+        if endpoint:
+            params['endpoint_url'] = f"http://{endpoint}:{port}"
 
-        # Only auto-detect the DynamoDB endpoint if the endpoint was not specified through other config
-        if 'host' not in params and use_instance_metadata:
-            response = urlopen('http://169.254.169.254/latest/dynamic/instance-identity/document').read()
-            doc = json.loads(response);
-            params['host'] = 'dynamodb.%s.amazonaws.com' % (doc['region'])
-            if 'region' in params:
-                del params['region']
+        # ✅ Auto-detect AWS endpoint (if no endpoint is provided)
+        if 'endpoint_url' not in params and use_instance_metadata:
+            try:
+                response = urlopen('http://169.254.169.254/latest/dynamic/instance-identity/document').read()
+                doc = json.loads(response)
+                params['region_name'] = doc['region']
+            except Exception as e:
+                raise Exception("Error accessing instance metadata: ", e)
 
-        db = DynamoDBConnection(**params)
+        # ✅ Create DynamoDB connection
+        db = boto3.resource('dynamodb', **params)
+
     return db
+        
+    # else:
+    #     return boto3.resource('dynamodb', region_name='us-west-2')
 
-def createGamesTable(db):
-
+def createGamesTable(dynamodb=None):
+    print("sD")
     try:
-        hostStatusDate = GlobalAllIndex("HostId-StatusDate-index",
-                                        parts=[HashKey("HostId"), RangeKey("StatusDate")],
-                                        throughput={
-                                            'read': 1,
-                                            'write': 1
-                                        })
-        opponentStatusDate  = GlobalAllIndex("OpponentId-StatusDate-index",
-                                        parts=[HashKey("OpponentId"), RangeKey("StatusDate")],
-                                        throughput={
-                                            'read': 1,
-                                            'write': 1
-                                        })
-
-        #global secondary indexes
-        GSI = [hostStatusDate, opponentStatusDate]
-
-        gamesTable = Table.create("Games",
-                    schema=[HashKey("GameId")],
-                    throughput={
-                        'read': 1,
-                        'write': 1
-                    },
-                    global_indexes=GSI,
-                    connection=db)
-
-    except JSONResponseError as jre:
-        try:
-            gamesTable = Table("Games", connection=db)
-        except Exception as e:
-            print("Games Table doesn't exist.")
-    finally:
-        return gamesTable
-
-#parse command line args for credentials and such
-#for now just assume local is when args are empty
+        table = dynamodb.create_table(
+            TableName='Games',
+            KeySchema=[
+                {'AttributeName': 'GameId', 'KeyType': 'HASH'}
+            ],
+            AttributeDefinitions=[
+                {'AttributeName': 'GameId', 'AttributeType': 'S'},
+                {'AttributeName': 'HostId', 'AttributeType': 'S'},
+                {'AttributeName': 'StatusDate', 'AttributeType': 'S'},
+                {'AttributeName': 'OpponentId', 'AttributeType': 'S'}
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    'IndexName': 'HostId-StatusDate-index',
+                    'KeySchema': [
+                        {'AttributeName': 'HostId', 'KeyType': 'HASH'},
+                        {'AttributeName': 'StatusDate', 'KeyType': 'RANGE'}
+                    ],
+                    'Projection': {'ProjectionType': 'ALL'},
+                    'ProvisionedThroughput': {
+                        'ReadCapacityUnits': 1,
+                        'WriteCapacityUnits': 1
+                    }
+                },
+                {
+                    'IndexName': 'OpponentId-StatusDate-index',
+                    'KeySchema': [
+                        {'AttributeName': 'OpponentId', 'KeyType': 'HASH'},
+                        {'AttributeName': 'StatusDate', 'KeyType': 'RANGE'}
+                    ],
+                    'Projection': {'ProjectionType': 'ALL'},
+                    'ProvisionedThroughput': {
+                        'ReadCapacityUnits': 1,
+                        'WriteCapacityUnits': 1
+                    }
+                }
+            ],
+            ProvisionedThroughput={
+                'ReadCapacityUnits': 1,
+                'WriteCapacityUnits': 1
+            }
+        )
+        table.wait_until_exists()
+        return table
+    
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'ResourceInUseException':
+            return dynamodb.Table('Games')
+        else:
+            raise

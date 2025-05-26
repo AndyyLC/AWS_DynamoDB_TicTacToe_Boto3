@@ -1,23 +1,6 @@
-# Copyright 2014. Amazon Web Services, Inc. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-from boto.exception         import JSONResponseError
-from boto.dynamodb2.exceptions import ConditionalCheckFailedException
-from boto.dynamodb2.exceptions import ItemNotFound
-from boto.dynamodb2.exceptions import ValidationException
-from boto.dynamodb2.items   import Item
-from boto.dynamodb2.table   import Table
-from datetime               import datetime
+import boto3
+from botocore.exceptions import ClientError
+from datetime import datetime
 
 class GameController:
     """
@@ -30,235 +13,180 @@ class GameController:
 
     def createNewGame(self, gameId, creator, invitee):
         """
-        Using the High-Level API, an Item is created and saved to the table.
-        All the primary keys for either the schema or an index (GameId,
-        HostId, StatusDate, and OpponentId) as well as extra attributes needed to maintain
-        game state are given a value.
-        Returns True/False depending on the success of the save.
+        Creates a new game and saves it to the DynamoDB table.
         """
-
         now = str(datetime.now())
         statusDate = "PENDING_" + now
-        item = Item(self.cm.getGamesTable(), data= {
-                            "GameId"     : gameId,
-                            "HostId"     : creator,
-                            "StatusDate" : statusDate,
-                            "OUser"      : creator,
-                            "Turn"       : invitee,
-                            "OpponentId" : invitee
-                        })
+        table = self.cm.getGamesTable()
+        
+        item = {
+            "GameId": gameId,
+            "HostId": creator,
+            "StatusDate": statusDate,
+            "OUser": creator,
+            "Turn": invitee,
+            "OpponentId": invitee
+        }
 
-        return item.save()
+        try:
+            table.put_item(Item=item)
+            return True
+        except ClientError as e:
+            print(f"Error creating new game: {e}")
+            return False
 
     def checkIfTableIsActive(self):
-        description = self.cm.db.describe_table("Games")
-        status = description['Table']['TableStatus']
-
-        return status == "ACTIVE"
+        table = self.cm.getGamesTable()
+        try:
+            description = table.table_status
+            return description == "ACTIVE"
+        except ClientError as e:
+            print(f"Error checking table status: {e}")
+            return False
 
     def getGame(self, gameId):
         """
-        Basic get_item call on the Games Table, where we specify the primary key
-        GameId to be the parameter gameId.
-        Returns None on an ItemNotFound Exception.
+        Fetches a game from the DynamoDB table based on GameId.
+        Returns None if the item is not found.
         """
+        table = self.cm.getGamesTable()
         try:
-            item = self.cm.getGamesTable().get_item(GameId=gameId)
-        except ItemNotFound as inf:
+            response = table.get_item(Key={'GameId': gameId})
+            return response.get('Item', None)
+        except ClientError as e:
+            print(f"Error retrieving game: {e}")
             return None
-        except JSONResponseError as jre:
-            return None
-
-        return item
 
     def acceptGameInvite(self, game):
         date = str(datetime.now())
-        status = "IN_PROGRESS_"
-        statusDate = status + date
-        key = {
-                "GameId" : { "S" : game["GameId"] }
-            }
-
-        attributeUpdates = {
-                        "StatusDate" : {
-                            "Action" : "PUT",
-                            "Value"  : { "S" : statusDate }
-                            }
-                        }
-
-        expectations = {"StatusDate" : {
-                            "AttributeValueList": [{"S" : "PENDING_"}],
-                            "ComparisonOperator": "BEGINS_WITH"}
-                    }
+        statusDate = "IN_PROGRESS_" + date
+        table = self.cm.getGamesTable()
 
         try:
-            self.cm.db.update_item("Games", key=key,
-                        attribute_updates=attributeUpdates,
-                        expected=expectations)
-        except ConditionalCheckFailedException as ccfe:
+            response = table.update_item(
+                Key={'GameId': game["GameId"]},
+                UpdateExpression="SET StatusDate = :statusDate",
+                ConditionExpression="begins_with(StatusDate, :pending)",
+                ExpressionAttributeValues={
+                    ':statusDate': statusDate,
+                    ':pending': "PENDING_"
+                },
+                ReturnValues="ALL_NEW"
+            )
+            return True
+        except ClientError as e:
+            print(f"Error accepting game invite: {e}")
             return False
-
-        return True
 
     def rejectGameInvite(self, game):
         """
-        Reject the game invite, by deleting the Item from the table.
-        Conditional on the fact the game is still in the PENDING status.
-        Returns True/False depending on success of delete.
+        Rejects the game invite by deleting the game if it is still in "PENDING_" status.
         """
-
-        key = {
-                "GameId": { "S" : game["GameId"] }
-            }
-        expectation = {"StatusDate" : {
-                            "AttributeValueList": [{"S" : "PENDING_"}],
-                            "ComparisonOperator": "BEGINS_WITH" }
-                    }
+        table = self.cm.getGamesTable()
 
         try:
-            self.cm.db.delete_item("Games", key, expected=expectation)
-        except Exception as e:
+            response = table.delete_item(
+                Key={'GameId': game["GameId"]},
+                ConditionExpression="StatusDate = :pending",
+                ExpressionAttributeValues={':pending': "PENDING_"}
+            )
+            return True
+        except ClientError as e:
+            print(f"Error rejecting game invite: {e}")
             return False
 
-        return True
-
-    def getGameInvites(self,user):
+    def getGameInvites(self, user):
         """
-        Performs a query on the "OpponentId-StatusDate-index" in order to get the
-        10 most recent games you were invited to.
-        Returns a list of Game objects.
+        Retrieves up to 10 game invites for the user.
         """
+        
         invites = []
         if user == None:
             return invites
 
-        gameInvitesIndex = self.cm.getGamesTable().query(OpponentId__eq=user,
-                                            StatusDate__beginswith="PENDING_",
-                                            index="OpponentId-StatusDate-index",
-                                            limit=10)
-
-
-        for i in range(10):
-            try:
-                gameInvite = next(gameInvitesIndex)
-            except StopIteration as si:
-                break
-            except ValidationException as ve:
-                break
-            except JSONResponseError as jre:
-                if jre.body.get(u'__type', None) == self.ResourceNotFound:
-                    return None
-                else:
-                    raise jre
-
-            invites.append(gameInvite)
+        table = self.cm.getGamesTable()
+        try:
+            response = table.query(
+                IndexName="OpponentId-StatusDate-index",
+                KeyConditionExpression=boto3.dynamodb.conditions.Key('OpponentId').eq(user) & boto3.dynamodb.conditions.Key('StatusDate').begins_with("PENDING_"),
+                Limit=10
+            )
+            for item in response.get('Items', []):
+                invites.append(item)
+        except ClientError as e:
+            print(f"Error fetching game invites: {e}")
+            invites=None
 
         return invites
 
     def updateBoardAndTurn(self, item, position, current_player):
         """
-        Using the Low Level API, we execute a conditional write on the Item.
-        We are able to specify the particular item by passing in the keys param, in
-        this case it's just a GameId.
-        In expectations, we expect
-            the StatusDate to be IN_PROGRESS_<date of the game>,
-            the Turn to be the player who is currently logged in,
-            the "Space" to not exist as an attribute because it hasn't been written to yet.
-        If this succeeds we update the Turn to the next player, as well.
-        Returns True/False depending on the success of the these operations.
+        Updates the board and the player's turn.
         """
         player_one = item["HostId"]
         player_two = item["OpponentId"]
-        gameId     = item["GameId"]
+        gameId = item["GameId"]
         statusDate = item["StatusDate"]
         date = statusDate.split("_")[1]
 
-        representation = "X"
-        if item["OUser"] == current_player:
-            representation = "O"
+        representation = "X" if item["OUser"] != current_player else "O"
+        
+        next_player = player_two if current_player == player_one else player_one
 
-        if current_player == player_one:
-            next_player = player_two
-        else:
-            next_player = player_one
+        print(position)
+        print(current_player)
+        print(representation)
+        print(next_player)
 
-        key = {
-                "GameId" : { "S" : gameId }
-            }
+        print(f"GameId: {gameId}") 
+        print(f"StatusDate: {statusDate}")
+        print(f"Turn: {item['Turn']}, Current Player: {current_player}")
+        print(f"Position: {position}, Existing Value: {item.get(position, 'Not Set')}")
 
-        attributeUpdates = {
-                        position : {
-                            "Action" : "PUT",
-                            "Value"  : { "S" : representation }
-                            },
-                        "Turn" : {
-                            "Action" : "PUT",
-                            "Value" : { "S" : next_player }
-                            }
-                        }
+        table = self.cm.getGamesTable()
 
-
-        expectations = {"StatusDate" : {"AttributeValueList": [{"S" : "IN_PROGRESS_"}],
-                                        "ComparisonOperator": "BEGINS_WITH"},
-                        "Turn"       : {"Value" : {"S" : current_player}},
-                        position     : {"Exists" : False}}
-
-        # LOW LEVEL API
         try:
-            self.cm.db.update_item("Games", key=key,
-                        attribute_updates=attributeUpdates,
-                        expected=expectations)
-        except ConditionalCheckFailedException as ccfe:
+            response = table.update_item(
+                Key={'GameId': gameId},
+                UpdateExpression="SET #position = :representation, Turn = :next_player",
+                ConditionExpression="begins_with(StatusDate, :statusDate) AND Turn = :current_player AND attribute_not_exists(#position)",
+                ExpressionAttributeNames={'#position': position},
+                ExpressionAttributeValues={
+                    ':representation': representation,
+                    ':next_player': next_player,
+                    ':statusDate': "IN_PROGRESS_",
+                    ':current_player': current_player
+                },
+                ReturnValues="ALL_NEW"
+            )
+            return True
+        except ClientError as e:
+            print(f"Error updating board and turn: {e}")
             return False
-
-        return True
-
 
     def getBoardState(self, item):
         """
-        Puts the state of the board into a list, putting a blank space for
-        spaces that are not occupied.
+        Returns the current state of the game board as a list.
         """
-        squares = ["TopLeft", "TopMiddle", "TopRight", "MiddleLeft", "MiddleMiddle", "MiddleRight", \
-                    "BottomLeft", "BottomMiddle", "BottomRight"]
-        state = []
-        for square in squares:
-            value = item[square]
-            if value == None:
-                state.append(" ")
-            else:
-                state.append(value)
-
+        squares = ["TopLeft", "TopMiddle", "TopRight", "MiddleLeft", "MiddleMiddle", "MiddleRight", "BottomLeft", "BottomMiddle", "BottomRight"]
+        state = [item.get(square, " ") for square in squares]
         return state
 
     def checkForGameResult(self, board, item, current_player):
         """
-        Check the board to see if you've won,lost tied or in progress.
-        Returns "Win", "Loss", "Tie" or None (for in-progress)
+        Checks for game result (Win, Loss, Tie).
         """
-        yourMarker = "X"
-        theirMarker = "O"
-        if current_player == item["OUser"]:
-            yourMarker = "O"
-            theirMakrer = "X"
+        yourMarker = "O" if current_player == item["OUser"] else "X"
+        theirMarker = "X" if yourMarker == "O" else "O"
 
-        winConditions = [[0,3,6],[0,1,2],[0,4,8],
-                        [1,4,7],[2,5,8],[2,4,6],
-                        [3,4,5],[6,7,8]]
+        winConditions = [[0, 3, 6], [0, 1, 2], [0, 4, 8], [1, 4, 7], [2, 5, 8], [2, 4, 6], [3, 4, 5], [6, 7, 8]]
 
         for winCondition in winConditions:
-            b_zero = board[winCondition[0]]
-            b_one  = board[winCondition[1]]
-            b_two  = board[winCondition[2]]
-            if b_zero == b_one and \
-                b_one == b_two and \
-                b_two == yourMarker:
-                    return "Win"
-
-            if b_zero == b_one and \
-                b_one == b_two and \
-                b_two == theirMarker:
-                    return "Lose"
+            b_zero, b_one, b_two = board[winCondition[0]], board[winCondition[1]], board[winCondition[2]]
+            if b_zero == b_one == b_two == yourMarker:
+                return "Win"
+            if b_zero == b_one == b_two == theirMarker:
+                return "Lose"
 
         if self.checkForTie(board):
             return "Tie"
@@ -267,82 +195,60 @@ class GameController:
 
     def checkForTie(self, board):
         """
-        Checks the boardState to see if there are any empty spaces which would
-        signify that the game hasn't come to a stalemate yet.
+        Checks if the game is a tie.
         """
-        for cell in board:
-            if cell == " ":
-                return False
-        return True
+        return all(cell != " " for cell in board)
 
     def changeGameToFinishedState(self, item, result, current_user):
         """
-        This game verifies whether a game has an outcome already and if not
-        sets the StatusDate to FINISHED_<date> and fills the Result attribute
-        with the name of the winning player.
-        Returns True/False depending on the success of the operation.
+        Sets the game to finished state and updates the result.
         """
-
-        #Happens if you're visiting a game that already has a winner
-        if item["Result"] != None:
+        if item.get("Result") is not None:
             return True
 
         date = str(datetime.now())
         status = "FINISHED"
         item["StatusDate"] = status + "_" + date
         item["Turn"] = "N/A"
+        item["Result"] = result if result != "Win" else current_user
 
-        if result == "Tie":
-            item["Result"] = result
-        elif result == "Win":
-            item["Result"] = current_user
-        else:
-            if item["HostId"] == current_user:
-                item["Result"] = item["OpponentId"]
-            else:
-                item["Result"] = item["HostId"]
+        table = self.cm.getGamesTable()
 
-        return item.save()
+        try:
+            table.put_item(Item=item)
+            return True
+        except ClientError as e:
+            print(f"Error finishing the game: {e}")
+            return False
 
     def mergeQueries(self, host, opp, limit=10):
         """
-        Taking the two iterators of games you've played in (either host or opponent)
-        you sort through the elements taking the top 10 recent games into a list.
-        Returns a list of Game objects.
+        Merges two queries (host and opponent) and returns the top 10 most recent games.
         """
         games = []
         game_one = None
         game_two = None
+
         while len(games) <= limit:
-            if game_one == None:
+            if game_one is None:
                 try:
                     game_one = next(host)
-                except StopIteration as si:
-                    if game_two != None:
+                except StopIteration:
+                    if game_two:
                         games.append(game_two)
-
-                    for rest in opp:
-                        if len(games) == limit:
-                            break
-                        else:
-                            games.append(rest)
+                    games.extend(opp)
                     return games
 
-            if game_two == None:
+            if game_two is None:
                 try:
                     game_two = next(opp)
-                except StopIteration as si:
-                    if game_one != None:
+                except StopIteration:
+                    if game_one:
                         games.append(game_one)
-
-                    for rest in host:
-                        if len(games) == limit:
-                            break
-                        else:
-                            games.append(rest)
+                    games.extend(host)
                     return games
 
-            if game_one > game_two:
+            if game_one['StatusDate'] > game_two['StatusDate']:
                 games.append(game_one)
                 game_one = None
             else:
@@ -353,24 +259,30 @@ class GameController:
 
     def getGamesWithStatus(self, user, status):
         """
-        Query for all games that a user appears in and have a certain status.
-        Sorts/merges the results of the two queries for top 10 most recent games.
-        Return a list of Game objects.
+        Fetches games with the specified status.
         """
-
         if user == None:
             return []
+        print("progress")
+        table = self.cm.getGamesTable()
 
-        hostGamesInProgress = self.cm.getGamesTable().query(HostId__eq=user,
-                                            StatusDate__beginswith=status,
-                                            index="HostId-StatusDate-index",
-                                            limit=10)
+        
+        print("progress")
+        try:
+            hostGamesInProgress = table.query(
+                IndexName="HostId-StatusDate-index",
+                KeyConditionExpression=boto3.dynamodb.conditions.Key('HostId').eq(user) & boto3.dynamodb.conditions.Key('StatusDate').begins_with(status),
+                Limit=10
+            )
 
-        oppGamesInProgress = self.cm.getGamesTable().query(OpponentId__eq=user,
-                                            StatusDate__beginswith=status,
-                                            index="OpponentId-StatusDate-index",
-                                            limit=10)
+            oppGamesInProgress = table.query(
+                IndexName="OpponentId-StatusDate-index",
+                KeyConditionExpression=boto3.dynamodb.conditions.Key('OpponentId').eq(user) & boto3.dynamodb.conditions.Key('StatusDate').begins_with(status),
+                Limit=10
+            )
 
-        games = self.mergeQueries(hostGamesInProgress,
-                                oppGamesInProgress)
-        return games
+            games = self.mergeQueries(iter(hostGamesInProgress['Items']), iter(oppGamesInProgress['Items']))
+            return games
+        except ClientError as e:
+            print(f"Error fetching in progress {e}")
+            return False

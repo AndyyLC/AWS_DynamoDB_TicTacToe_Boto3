@@ -82,7 +82,7 @@ if serverPort is None:
 
 @application.route('/logout')
 def logout():
-    """
+    """ 
     Method associated to the route '/logout' that sets the logged in
     user of the session to None.
     """
@@ -110,6 +110,7 @@ def index():
 
     if session == {} or session.get("username", None) == None:
         form = request.form
+        print(f"{form}")
         if form:
             formInput = form["username"]
             if formInput and formInput.strip():
@@ -120,13 +121,18 @@ def index():
             session["username"] = None
 
     if request.method == "POST":
+        username = session.get('username', None)
+        print(f"{username}")
         return redirect('/index')
 
+    print("b")
     inviteGames = controller.getGameInvites(session["username"])
     if inviteGames == None:
+        print("nooo")
         flash("Table has not been created yet, please follow this link to create table.")
         return render_template("table.html",
                                 user="")
+    print("af")
     # Don't attempt to iterate over inviteGames until AFTER None test
     inviteGames = [Game(inviteGame) for inviteGame in inviteGames]
 
@@ -323,8 +329,10 @@ def selectSquare(gameId):
     if item == None:
         flash("This is not a valid game.")
         return redirect("/index")
+    
 
-    if controller.updateBoardAndTurn(item, value, session["username"]) == False:
+    username = session.get('username', None)
+    if controller.updateBoardAndTurn(item, value, username) == False:
         flash("You have selected a square either when \
                 it's not your turn, \
                 the square is already selected, \
